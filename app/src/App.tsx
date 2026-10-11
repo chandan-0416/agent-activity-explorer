@@ -96,10 +96,13 @@ function App() {
   const [detailsRetryCount, setDetailsRetryCount] = useState(0);
   const [agentsError, setAgentsError] = useState<string | null>(null);
 
+  const [isSlowNetwork, setIsSlowNetwork] = useState(false);
+  const [detailsSlowNetwork, setDetailsSlowNetwork] = useState(false);
+
   const agentKey = JSON.stringify(filters.agents);
 
   function applyFilters(nextFilters: Filters) {
-    const nextUrl = buildUrl(nextFilters);
+    const nextUrl = buildUrl(nextFilters, selectedEventId);
     const currentUrl =
       window.location.pathname +
       window.location.search +
@@ -111,8 +114,6 @@ function App() {
 
     setFilters(nextFilters);
   }
-
-  // Keep the UI synchronized with browser Back and Forward.
 
   useEffect(() => {
     function handlePopState() {
@@ -131,7 +132,6 @@ function App() {
     };
   }, []);
 
-  // Load the available agent names.
   useEffect(() => {
     const controller = new AbortController();
 
@@ -149,7 +149,6 @@ function App() {
 
         const data: unknown = await response.json();
 
-        // Accept either a plain array or an object containing "value".
         const list = Array.isArray(data)
           ? data
           : typeof data === "object" &&
@@ -189,16 +188,19 @@ function App() {
       return;
     }
 
+    const currentId = selectedEventId;
     const controller = new AbortController();
+    const slowTimer = setTimeout(() => setDetailsSlowNetwork(true), 2000);
 
     async function fetchEventDetails() {
       try {
         setDetailsLoading(true);
         setDetailsError(null);
+        setDetailsSlowNetwork(false);
         setSelectedEvent(null);
 
         const response = await fetch(
-          `${API_URL}/events/${encodeURIComponent(selectedEventId)}`,
+          `${API_URL}/events/${encodeURIComponent(currentId)}`,
           { signal: controller.signal },
         );
 
@@ -219,6 +221,8 @@ function App() {
             : "Could not load event details.",
         );
       } finally {
+        clearTimeout(slowTimer);
+        setDetailsSlowNetwork(false);
         if (!controller.signal.aborted) {
           setDetailsLoading(false);
         }
@@ -227,7 +231,10 @@ function App() {
 
     void fetchEventDetails();
 
-    return () => controller.abort();
+    return () => {
+      clearTimeout(slowTimer);
+      controller.abort();
+    };
   }, [selectedEventId, detailsRetryCount]);
 
   useEffect(() => {
@@ -251,14 +258,15 @@ function App() {
     };
   }, [selectedEventId]);
 
-  // Fetch a new page of events whenever an applied filter changes.
   useEffect(() => {
     const controller = new AbortController();
+    const slowTimer = setTimeout(() => setIsSlowNetwork(true), 2000);
 
     async function fetchEvents() {
       try {
         setLoading(true);
         setError(null);
+        setIsSlowNetwork(false);
 
         const params = new URLSearchParams();
         params.set("limit", "50");
@@ -295,6 +303,8 @@ function App() {
           err instanceof Error ? err.message : "An unexpected error occurred.",
         );
       } finally {
+        clearTimeout(slowTimer);
+        setIsSlowNetwork(false);
         if (!controller.signal.aborted) {
           setLoading(false);
         }
@@ -303,7 +313,10 @@ function App() {
 
     void fetchEvents();
 
-    return () => controller.abort();
+    return () => {
+      clearTimeout(slowTimer);
+      controller.abort();
+    };
   }, [filters.q, filters.status, agentKey]);
 
   function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
@@ -529,6 +542,9 @@ function App() {
         {loading ? (
           <p className="state-message" role="status">
             Loading events…
+            {isSlowNetwork && (
+              <span className="slow-notice"> (Network is slow, waiting for server…)</span>
+            )}
           </p>
         ) : error ? (
           <div className="state-message error" role="alert">
@@ -560,7 +576,7 @@ function App() {
 
                   <tr
                     key={event.id}
-                    className="event-row"
+                    className={`event-row${selectedEventId === event.id ? " selected" : ""}`}
                     tabIndex={0}
                     aria-label={`Open event ${event.id}`}
                     onClick={() => openEventDetails(event.id)}
@@ -571,6 +587,14 @@ function App() {
                       ) {
                         keyboardEvent.preventDefault();
                         openEventDetails(event.id);
+                      } else if (keyboardEvent.key === "ArrowDown") {
+                        keyboardEvent.preventDefault();
+                        const next = keyboardEvent.currentTarget.nextElementSibling as HTMLElement | null;
+                        next?.focus();
+                      } else if (keyboardEvent.key === "ArrowUp") {
+                        keyboardEvent.preventDefault();
+                        const prev = keyboardEvent.currentTarget.previousElementSibling as HTMLElement | null;
+                        prev?.focus();
                       }
                     }}
                   >
@@ -651,6 +675,9 @@ function App() {
             {detailsLoading && (
               <p className="state-message" role="status">
                 Loading event details…
+                {detailsSlowNetwork && (
+                  <span className="slow-notice"> (Network is slow, waiting for server…)</span>
+                )}
               </p>
             )}
 

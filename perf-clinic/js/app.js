@@ -11,7 +11,17 @@ const tickerToggle = document.getElementById('ticker-toggle');
 const preview = document.getElementById('row-preview');
 const scrollContext = document.getElementById('scroll-context');
 
-const minCardHeight = 220;
+window.ACTIVITY.sort((a, b) => (b.timestamp > a.timestamp ? 1 : b.timestamp < a.timestamp ? -1 : 0));
+
+const callsPerMinute = new Map();
+const agentCallCounts = {};
+
+for (let i = 0; i < window.ACTIVITY.length; i++) {
+  const event = window.ACTIVITY[i];
+  const minute = event.timestamp.slice(11, 16);
+  callsPerMinute.set(minute, (callsPerMinute.get(minute) || 0) + 1);
+  agentCallCounts[event.agent] = (agentCallCounts[event.agent] || 0) + 1;
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -25,16 +35,7 @@ function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('en-GB', { hour12: false, timeZone: 'UTC' });
 }
 
-function countByAgent(events) {
-  const counts = {};
-  events.forEach((event) => {
-    counts[event.agent] = (counts[event.agent] || 0) + 1;
-  });
-  return counts;
-}
-
 function renderAgents() {
-  const counts = countByAgent(window.ACTIVITY);
   grid.innerHTML = window.AGENTS.map((agent, index) => {
     const image = 'assets/agents/agent-' + String((index % 12) + 1).padStart(2, '0') + '.png';
     return (
@@ -43,56 +44,61 @@ function renderAgents() {
       '<h3>' + escapeHtml(agent.name) + '</h3>' +
       '<p class="agent-owner">' + escapeHtml(agent.owner) + '</p>' +
       '<p class="agent-description">' + escapeHtml(agent.description) + '</p>' +
-      '<p class="agent-count">' + (counts[agent.name] || 0).toLocaleString() + ' calls today</p>' +
+      '<p class="agent-count">' + (agentCallCounts[agent.name] || 0).toLocaleString() + ' calls today</p>' +
       '</article>'
     );
   }).join('');
-  grid.querySelectorAll('img').forEach((img) => img.addEventListener('load', equalizeCardHeights));
-}
-
-function equalizeCardHeights() {
-  const cards = grid.querySelectorAll('.agent-card');
-  cards.forEach((card) => {
-    card.style.height = '';
-    const rowTop = card.offsetTop;
-    let tallest = Math.max(card.offsetHeight, minCardHeight);
-    cards.forEach((other) => {
-      if (other.offsetTop === rowTop) {
-        tallest = Math.max(tallest, other.offsetHeight);
-      }
-    });
-    card.style.height = tallest + 'px';
-  });
 }
 
 function loadViewed() {
-  return JSON.parse(localStorage.getItem(storageKey) || '[]');
+  try {
+    return JSON.parse(localStorage.getItem(storageKey) || '[]');
+  } catch {
+    return [];
+  }
 }
 
 function rememberViewed(items) {
   const viewed = loadViewed();
-  for (const item of items) {
-    if (!viewed.includes(item.id)) {
-      viewed.push(item.id);
+  const viewedSet = new Set(viewed);
+  let changed = false;
+
+  for (let i = 0; i < items.length; i++) {
+    const id = items[i].id;
+    if (!viewedSet.has(id)) {
+      viewedSet.add(id);
+      changed = true;
     }
-    localStorage.setItem(storageKey, JSON.stringify(viewed));
+  }
+
+  if (changed) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(Array.from(viewedSet)));
+    } catch {
+    }
   }
 }
 
 function search(query) {
   const needle = query.trim().toLowerCase();
-  return window.ACTIVITY
-    .filter((event) => JSON.stringify(event).toLowerCase().includes(needle))
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  if (!needle) return window.ACTIVITY;
+
+  return window.ACTIVITY.filter((event) =>
+    event.summary.toLowerCase().includes(needle) ||
+    event.agent.toLowerCase().includes(needle) ||
+    event.tool.toLowerCase().includes(needle) ||
+    event.status.includes(needle)
+  );
 }
 
 function renderResults(query) {
   const matches = search(query);
   const page = matches.slice(0, pageSize);
-  const viewed = loadViewed();
+  const viewed = new Set(loadViewed());
+
   resultsCount.textContent = matches.length.toLocaleString() + ' matching tool calls';
   resultsList.innerHTML = page.map((event) => {
-    const isNew = !viewed.includes(event.id);
+    const isNew = !viewed.has(event.id);
     return (
       '<li class="result-row status-' + event.status + '" data-id="' + event.id + '" data-minute="' + event.timestamp.slice(11, 16) + '">' +
       '<span class="result-time">' + formatTime(event.timestamp) + '</span>' +
@@ -105,43 +111,45 @@ function renderResults(query) {
       '</li>'
     );
   }).join('');
-  fitSummaries();
+
   rememberViewed(page);
 }
 
-function fitSummaries() {
-  resultsList.querySelectorAll('.result-summary').forEach((cell) => {
-    let size = 14;
-    cell.style.fontSize = size + 'px';
-    while (cell.scrollWidth > cell.clientWidth && size > 11) {
-      size -= 0.5;
-      cell.style.fontSize = size + 'px';
-    }
-  });
-}
+let scrollTicking = false;
+let currentFocusedRow = null;
 
 function onScroll() {
-  const scrolled = window.scrollY;
-  const max = document.documentElement.scrollHeight - window.innerHeight;
-  progress.style.width = (max > 0 ? (scrolled / max) * 100 : 0) + '%';
-  topbar.classList.toggle('topbar-raised', scrolled > 8);
-  topbar.style.paddingBlock = Math.max(6, 12 - scrolled / 20) + 'px';
-  backToTop.classList.toggle('visible', scrolled > window.innerHeight);
-  resultsList.querySelectorAll('.result-row').forEach((row) => {
-    row.classList.remove('in-focus');
-    const rect = row.getBoundingClientRect();
-    if (rect.top > window.innerHeight * 0.3 && rect.top < window.innerHeight * 0.6) {
-      row.classList.add('in-focus');
+  if (scrollTicking) return;
+  scrollTicking = true;
+
+  requestAnimationFrame(() => {
+    const scrolled = window.scrollY;
+    const max = document.documentElement.scrollHeight - window.innerHeight;
+    progress.style.width = (max > 0 ? (scrolled / max) * 100 : 0) + '%';
+    topbar.classList.toggle('topbar-raised', scrolled > 8);
+    backToTop.classList.toggle('visible', scrolled > window.innerHeight);
+
+    const midX = window.innerWidth / 2;
+    const midY = window.innerHeight * 0.45;
+    const elementAtMid = document.elementFromPoint(midX, midY);
+    const candidateRow = elementAtMid ? elementAtMid.closest('.result-row') : null;
+
+    if (candidateRow !== currentFocusedRow) {
+      if (currentFocusedRow) currentFocusedRow.classList.remove('in-focus');
+      if (candidateRow) candidateRow.classList.add('in-focus');
+      currentFocusedRow = candidateRow;
     }
+
+    if (currentFocusedRow) {
+      const minute = currentFocusedRow.dataset.minute;
+      const sameMinute = callsPerMinute.get(minute) || 0;
+      scrollContext.textContent = minute + ' UTC · ' + sameMinute + ' calls that minute';
+    } else {
+      scrollContext.textContent = '';
+    }
+
+    scrollTicking = false;
   });
-  const focused = resultsList.querySelector('.in-focus');
-  if (focused) {
-    const minute = focused.dataset.minute;
-    const sameMinute = window.ACTIVITY.filter((event) => new Date(event.timestamp).toISOString().slice(11, 16) === minute).length;
-    scrollContext.textContent = minute + ' UTC · ' + sameMinute + ' calls that minute';
-  } else {
-    scrollContext.textContent = '';
-  }
 }
 
 function hidePreview() {
@@ -161,6 +169,7 @@ function showPreview(event) {
 
 const renderedTickerRows = new Map();
 let tickerPanel = null;
+let tickerTimer = null;
 
 function tickerRow(event) {
   if (renderedTickerRows.has(event.id)) {
@@ -172,7 +181,10 @@ function tickerRow(event) {
     '<span class="ticker-time">' + formatTime(event.timestamp) + '</span>' +
     '<span class="ticker-agent">' + escapeHtml(event.agent) + '</span>' +
     '<span class="ticker-tool">' + escapeHtml(event.tool) + '</span>';
-  renderedTickerRows.set(event.id, row);
+
+  if (renderedTickerRows.size < 500) {
+    renderedTickerRows.set(event.id, row);
+  }
   return row.cloneNode(true);
 }
 
@@ -189,7 +201,7 @@ function openTicker() {
   tickerPanel = panel;
   const list = panel.querySelector('.ticker-list');
 
-  setInterval(() => {
+  tickerTimer = setInterval(() => {
     const event = window.ACTIVITY[Math.floor(Math.random() * window.ACTIVITY.length)];
     list.prepend(tickerRow(event));
     while (list.children.length > tickerVisibleRows) {
@@ -198,33 +210,47 @@ function openTicker() {
   }, tickerIntervalMs);
 
   window.addEventListener('resize', positionTicker);
-  window.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') closeTicker();
-  });
+  window.addEventListener('keydown', handleTickerKeydown);
   positionTicker();
   tickerToggle.setAttribute('aria-pressed', 'true');
   tickerToggle.textContent = 'Hide live calls';
 }
 
+function handleTickerKeydown(event) {
+  if (event.key === 'Escape') closeTicker();
+}
+
 function closeTicker() {
   if (!tickerPanel) return;
+
+  if (tickerTimer) {
+    clearInterval(tickerTimer);
+    tickerTimer = null;
+  }
+
+  window.removeEventListener('resize', positionTicker);
+  window.removeEventListener('keydown', handleTickerKeydown);
   tickerPanel.remove();
   tickerPanel = null;
   tickerToggle.setAttribute('aria-pressed', 'false');
   tickerToggle.textContent = 'Show live calls';
 }
 
-searchInput.addEventListener('input', () => renderResults(searchInput.value));
-window.addEventListener('scroll', onScroll);
-window.addEventListener('resize', equalizeCardHeights);
-window.addEventListener('resize', fitSummaries);
+let searchDebounceTimer = null;
+searchInput.addEventListener('input', () => {
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    renderResults(searchInput.value);
+  }, 180);
+});
+
+window.addEventListener('scroll', onScroll, { passive: true });
 resultsList.addEventListener('mousemove', showPreview);
 resultsList.addEventListener('mouseleave', hidePreview);
-resultsList.addEventListener('wheel', hidePreview);
-resultsList.addEventListener('touchstart', hidePreview);
+resultsList.addEventListener('wheel', hidePreview, { passive: true });
+resultsList.addEventListener('touchstart', hidePreview, { passive: true });
 backToTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
 tickerToggle.addEventListener('click', () => (tickerPanel ? closeTicker() : openTicker()));
 
 renderAgents();
-equalizeCardHeights();
 renderResults('');
